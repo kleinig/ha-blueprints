@@ -59,19 +59,19 @@ blueprint:
           min: 0
           max: 10000
 
-    check_interval:
-      name: Check Interval (seconds)
-      default: 30
-      selector:
-        number:
-          min: 5
-          max: 300
+  check_interval:
+    name: Check Interval (minutes)
+    default: 1
+    selector:
+      number:
+        min: 1
+        max: 10
 
 mode: restart
 
 trigger:
   - platform: time_pattern
-    seconds: "/{{ input.check_interval }}"
+    minutes: "/1"
 
 variables:
   pv: "{{ states(input.pv_power) | float(0) }}"
