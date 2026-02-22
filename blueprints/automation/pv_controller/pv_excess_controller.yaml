@@ -1,9 +1,8 @@
 blueprint:
-  name: PV Excess Load Controller (Forecast + Priority)
+  name: PV Excess Load Controller with Forecast & Priority
   description: >
-    Controls loads based on excess PV, battery target (Sigenergy),
-    and Solcast forecast. Supports priority, minimum runtime,
-    and logs all decisions.
+    Turns devices on/off based on excess PV, battery target (Sigenergy),
+    and Solcast forecast. Supports priorities, minimum runtime, and logging.
   domain: automation
 
   input:
@@ -48,7 +47,7 @@ blueprint:
 
     loads:
       name: Load Devices
-      description: Devices with power, priority, and minimum runtime (seconds)
+      description: Devices with power + priority
       selector:
         object:
 
@@ -61,20 +60,18 @@ blueprint:
           max: 10000
 
     check_interval:
-      name: Check Interval (minutes)
-      description: How often to evaluate loads
-      default: 1
+      name: Check Interval (seconds)
+      default: 30
       selector:
         number:
-          min: 1
-          max: 10
-          unit_of_measurement: minutes
+          min: 5
+          max: 300
 
 mode: restart
 
 trigger:
   - platform: time_pattern
-    minutes: "/1"
+    seconds: "/{{ input.check_interval }}"
 
 variables:
   pv: "{{ states(input.pv_power) | float(0) }}"
@@ -86,20 +83,13 @@ variables:
 
   excess_power: "{{ pv - load }}"
 
-  required_energy: >
-    {{ ((target - soc) / 100) * capacity }}
+  required_energy:
+    "{{ ((target - soc) / 100) * capacity }}"
 
-  forecast_surplus: >
-    {{ forecast - required_energy }}
+  forecast_surplus:
+    "{{ forecast - required_energy }}"
 
 action:
-
-  # ⏱ Respect interval setting
-  - condition: template
-    value_template: >
-      {{ (now().minute % (input.check_interval | int)) == 0 }}
-
-  # 🔢 Sort loads by priority
   - variables:
       sorted_loads: >
         {{ dict(input.loads)
@@ -110,56 +100,50 @@ action:
   - repeat:
       for_each: "{{ sorted_loads }}"
       sequence:
-
         - variables:
             entity: "{{ repeat.item.entity }}"
             power: "{{ repeat.item.power }}"
             priority: "{{ repeat.item.priority }}"
             min_runtime: "{{ repeat.item.min_runtime | default(0) }}"
-            last_changed: "{{ states.get(entity).last_changed }}"
+            last_changed: "{{ states[entity].last_changed }}"
             runtime: >
               {{ (now() - last_changed).total_seconds() }}
 
         - choose:
 
-            # ✅ TURN ON
+            # TURN ON
             - conditions:
                 - condition: template
                   value_template: >
                     {{ excess_power > power
-                       and forecast_surplus > 0
-                       and excess_power > (input.min_excess_power | float) }}
-
-                - condition: template
-                  value_template: >
-                    {{ is_state(entity, 'off') }}
+                       and forecast_surplus > 0 }}
+                - condition: state
+                  entity_id: "{{ entity }}"
+                  state: "off"
 
               sequence:
                 - service: switch.turn_on
                   target:
-                    entity_id: >
-                      {{ entity }}
+                    entity_id: "{{ entity }}"
 
                 - service: logbook.log
                   data:
                     name: PV Controller
                     message: >
                       Turned ON {{ entity }}
-                      | Excess: {{ excess_power | round(0) }}W
-                      | Forecast surplus: {{ forecast_surplus | round(2) }}kWh
-                      | Priority: {{ priority }}
+                      (Excess: {{ excess_power }}W,
+                       Forecast surplus: {{ forecast_surplus }}kWh,
+                       Priority: {{ priority }})
 
-            # ❌ TURN OFF
+            # TURN OFF
             - conditions:
                 - condition: template
                   value_template: >
                     {{ (excess_power < power
                         or forecast_surplus < 0) }}
-
-                - condition: template
-                  value_template: >
-                    {{ is_state(entity, 'on') }}
-
+                - condition: state
+                  entity_id: "{{ entity }}"
+                  state: "on"
                 - condition: template
                   value_template: >
                     {{ runtime > min_runtime }}
@@ -167,14 +151,13 @@ action:
               sequence:
                 - service: switch.turn_off
                   target:
-                    entity_id: >
-                      {{ entity }}
+                    entity_id: "{{ entity }}"
 
                 - service: logbook.log
                   data:
                     name: PV Controller
                     message: >
                       Turned OFF {{ entity }}
-                      | Excess: {{ excess_power | round(0) }}W
-                      | Forecast surplus: {{ forecast_surplus | round(2) }}kWh
-                      | Runtime: {{ runtime | round(0) }}s
+                      (Excess: {{ excess_power }}W,
+                       Forecast surplus: {{ forecast_surplus }}kWh,
+                       Runtime: {{ runtime }}s)
