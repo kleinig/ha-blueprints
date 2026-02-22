@@ -8,12 +8,10 @@ blueprint:
 
   input:
     target_device:
-      name: Device
+      name: Device (Switch or Climate)
+      description: Select a switch or climate entity to control
       selector:
-        entity:
-          domain:
-            - switch
-            - climate
+        entity: {}
 
     device_power:
       name: Device Power (W)
@@ -31,21 +29,25 @@ blueprint:
           multiple: true
 
     pv_power:
+      name: PV Power
       selector:
         entity:
           domain: sensor
 
     house_load:
+      name: House Load
       selector:
         entity:
           domain: sensor
 
     battery_soc:
+      name: Battery SOC
       selector:
         entity:
           domain: sensor
 
     battery_target:
+      name: Target Battery %
       default: 90
       selector:
         number:
@@ -53,11 +55,13 @@ blueprint:
           max: 100
 
     solcast_forecast_remaining:
+      name: Remaining Forecast (kWh)
       selector:
         entity:
           domain: sensor
 
     battery_capacity_kwh:
+      name: Battery Capacity (kWh)
       selector:
         number:
           min: 1
@@ -116,7 +120,12 @@ variables:
 
 action:
 
-  # ⏱ Respect interval
+  # 🔒 Safety: only allow switch or climate
+  - condition: template
+    value_template: >
+      {{ device.split('.')[0] in ['switch', 'climate'] }}
+
+  # ⏱ Interval control
   - condition: template
     value_template: >
       {{ (now().minute % (input.check_interval | int)) == 0 }}
