@@ -1,11 +1,33 @@
 blueprint:
-  name: PV Smart Load Controller (Advanced - Forecast + Smoothing + Priority)
+  name: PV Smart Load (Per Device with Priority Awareness)
   description: >
-    Advanced PV load controller with smoothing, hysteresis, battery protection,
-    forecast awareness, and intelligent load prioritisation.
+    One automation per device. Uses PV excess, forecast, and
+    respects higher priority loads.
+
   domain: automation
 
   input:
+    target_device:
+      name: Device
+      selector:
+        entity:
+          domain: switch
+
+    device_power:
+      name: Device Power (W)
+      selector:
+        number:
+          min: 0
+          max: 10000
+
+    higher_priority_devices:
+      name: Higher Priority Devices
+      description: Devices that must run before this one
+      default: []
+      selector:
+        entity:
+          multiple: true
+
     pv_power:
       selector:
         entity:
@@ -39,43 +61,12 @@ blueprint:
           min: 1
           max: 100
 
-    loads:
-      description: entity, power, priority, min_runtime
-      selector:
-        object:
-
-    min_excess_power:
-      default: 300
+    min_runtime:
+      default: 0
       selector:
         number:
           min: 0
-          max: 10000
-
-    hysteresis:
-      name: Hysteresis Buffer (W)
-      default: 200
-      selector:
-        number:
-          min: 0
-          max: 2000
-
-    smoothing_factor:
-      name: Smoothing Factor (0-1)
-      description: Lower = smoother (recommended 0.3)
-      default: 0.3
-      selector:
-        number:
-          min: 0.1
-          max: 1
-          step: 0.1
-
-    dump_mode_hour:
-      name: Dump Mode Start Hour
-      default: 15
-      selector:
-        number:
-          min: 12
-          max: 20
+          max: 7200
 
     check_interval:
       default: 1
@@ -98,13 +89,10 @@ variables:
   target: "{{ input.battery_target | float }}"
   capacity: "{{ input.battery_capacity_kwh | float }}"
 
-  raw_excess: "{{ pv - load }}"
+  device: !input target_device
+  device_power: !input device_power
 
-  # EMA smoothing (stores last value in input_number helper recommended)
-  smoothed_excess: >
-    {% set prev = states('input_number.pv_smoothed_excess') | float(0) %}
-    {% set alpha = input.smoothing_factor | float %}
-    {{ (alpha * raw_excess) + ((1 - alpha) * prev) }}
+  excess_power: "{{ pv - load }}"
 
   required_energy: >
     {{ ((target - soc) / 100) * capacity }}
@@ -112,9 +100,14 @@ variables:
   forecast_surplus: >
     {{ forecast - required_energy }}
 
-  dump_mode: >
-    {{ now().hour >= (input.dump_mode_hour | int)
-       and forecast_surplus > 0 }}
+  higher_running: >
+    {{ expand(input.higher_priority_devices)
+       | selectattr('state', 'eq', 'on')
+       | list
+       | count > 0 }}
+
+  last_changed: "{{ states.get(device).last_changed }}"
+  runtime: "{{ (now() - last_changed).total_seconds() }}"
 
 action:
 
@@ -123,86 +116,61 @@ action:
     value_template: >
       {{ (now().minute % (input.check_interval | int)) == 0 }}
 
-  # 💾 Store smoothed value
-  - service: input_number.set_value
-    target:
-      entity_id: input_number.pv_smoothed_excess
-    data:
-      value: "{{ smoothed_excess }}"
+  - choose:
 
-  - variables:
-      sorted_loads: >
-        {{ dict(input.loads)
-           | dictsort(by='value.priority')
-           | map(attribute=1)
-           | list }}
+      # ✅ TURN ON
+      - conditions:
+          - condition: template
+            value_template: >
+              {{ excess_power > device_power
+                 and forecast_surplus > 0
+                 and not higher_running }}
 
-  - repeat:
-      for_each: "{{ sorted_loads }}"
-      sequence:
+          - condition: template
+            value_template: >
+              {{ is_state(device, 'off') }}
 
-        - variables:
-            entity: "{{ repeat.item.entity }}"
-            power: "{{ repeat.item.power }}"
-            priority: "{{ repeat.item.priority }}"
-            min_runtime: "{{ repeat.item.min_runtime | default(0) }}"
-            last_changed: "{{ states.get(entity).last_changed }}"
-            runtime: >
-              {{ (now() - last_changed).total_seconds() }}
+        sequence:
+          - service: switch.turn_on
+            target:
+              entity_id: "{{ device }}"
 
-        - choose:
+          - service: logbook.log
+            data:
+              name: PV Device Controller
+              message: >
+                ON {{ device }}
+                | Excess: {{ excess_power }}
+                | Forecast OK
+                | No higher priority loads active
 
-            # ✅ TURN ON (smoothed + hysteresis)
-            - conditions:
-                - condition: template
-                  value_template: >
-                    {{ smoothed_excess > (power + input.hysteresis)
-                       and (forecast_surplus > 0 or dump_mode) }}
+      # ❌ TURN OFF
+      - conditions:
+          - condition: template
+            value_template: >
+              {{ excess_power < device_power
+                 or forecast_surplus < 0
+                 or higher_running }}
 
-                - condition: template
-                  value_template: >
-                    {{ is_state(entity, 'off') }}
+          - condition: template
+            value_template: >
+              {{ is_state(device, 'on') }}
 
-              sequence:
-                - service: switch.turn_on
-                  target:
-                    entity_id: "{{ entity }}"
+          - condition: template
+            value_template: >
+              {{ runtime > min_runtime }}
 
-                - service: logbook.log
-                  data:
-                    name: PV Smart Controller
-                    message: >
-                      ON {{ entity }}
-                      | Smoothed Excess: {{ smoothed_excess | round(0) }}W
-                      | Forecast: {{ forecast_surplus | round(2) }}kWh
-                      | Dump Mode: {{ dump_mode }}
-                      | Priority: {{ priority }}
+        sequence:
+          - service: switch.turn_off
+            target:
+              entity_id: "{{ device }}"
 
-            # ❌ TURN OFF (hysteresis lower bound)
-            - conditions:
-                - condition: template
-                  value_template: >
-                    {{ smoothed_excess < (power - input.hysteresis)
-                       and not dump_mode }}
-
-                - condition: template
-                  value_template: >
-                    {{ is_state(entity, 'on') }}
-
-                - condition: template
-                  value_template: >
-                    {{ runtime > min_runtime }}
-
-              sequence:
-                - service: switch.turn_off
-                  target:
-                    entity_id: "{{ entity }}"
-
-                - service: logbook.log
-                  data:
-                    name: PV Smart Controller
-                    message: >
-                      OFF {{ entity }}
-                      | Smoothed Excess: {{ smoothed_excess | round(0) }}W
-                      | Runtime: {{ runtime | round(0) }}s
-                      | Reason: Low solar or battery priority
+          - service: logbook.log
+            data:
+              name: PV Device Controller
+              message: >
+                OFF {{ device }}
+                | Reason:
+                {% if higher_running %}Higher priority active{% endif %}
+                {% if forecast_surplus < 0 %} Forecast low{% endif %}
+                {% if excess_power < device_power %} Not enough solar{% endif %}
