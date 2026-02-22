@@ -1,8 +1,8 @@
 blueprint:
-  name: PV Smart Load (Per Device with Priority Awareness)
+  name: PV Smart Load (Per Device - Switch & Climate)
   description: >
-    One automation per device. Uses PV excess, forecast, and
-    respects higher priority loads.
+    One automation per device. Uses PV excess, forecast, and respects
+    higher priority loads. Supports switch and climate devices.
 
   domain: automation
 
@@ -11,7 +11,9 @@ blueprint:
       name: Device
       selector:
         entity:
-          domain: switch
+          domain:
+            - switch
+            - climate
 
     device_power:
       name: Device Power (W)
@@ -62,6 +64,7 @@ blueprint:
           max: 100
 
     min_runtime:
+      name: Minimum Runtime (seconds)
       default: 0
       selector:
         number:
@@ -69,6 +72,7 @@ blueprint:
           max: 7200
 
     check_interval:
+      name: Check Interval (minutes)
       default: 1
       selector:
         number:
@@ -82,15 +86,16 @@ trigger:
     minutes: "/1"
 
 variables:
+  device: !input target_device
+  device_domain: "{{ device.split('.')[0] }}"
+  device_power: !input device_power
+
   pv: "{{ states(input.pv_power) | float(0) }}"
   load: "{{ states(input.house_load) | float(0) }}"
   soc: "{{ states(input.battery_soc) | float(0) }}"
   forecast: "{{ states(input.solcast_forecast_remaining) | float(0) }}"
   target: "{{ input.battery_target | float }}"
   capacity: "{{ input.battery_capacity_kwh | float }}"
-
-  device: !input target_device
-  device_power: !input device_power
 
   excess_power: "{{ pv - load }}"
 
@@ -102,7 +107,7 @@ variables:
 
   higher_running: >
     {{ expand(input.higher_priority_devices)
-       | selectattr('state', 'eq', 'on')
+       | selectattr('state', 'ne', 'off')
        | list
        | count > 0 }}
 
@@ -111,7 +116,7 @@ variables:
 
 action:
 
-  # ⏱ Interval control
+  # ⏱ Respect interval
   - condition: template
     value_template: >
       {{ (now().minute % (input.check_interval | int)) == 0 }}
@@ -128,10 +133,15 @@ action:
 
           - condition: template
             value_template: >
-              {{ is_state(device, 'off') }}
+              {{ states(device) == 'off' }}
 
         sequence:
-          - service: switch.turn_on
+          - service: >
+              {% if device_domain == 'climate' %}
+                climate.turn_on
+              {% else %}
+                switch.turn_on
+              {% endif %}
             target:
               entity_id: "{{ device }}"
 
@@ -140,9 +150,9 @@ action:
               name: PV Device Controller
               message: >
                 ON {{ device }}
-                | Excess: {{ excess_power }}
-                | Forecast OK
-                | No higher priority loads active
+                | Excess: {{ excess_power | round(0) }}W
+                | Forecast OK ({{ forecast_surplus | round(2) }}kWh)
+                | No higher priority loads
 
       # ❌ TURN OFF
       - conditions:
@@ -154,14 +164,19 @@ action:
 
           - condition: template
             value_template: >
-              {{ is_state(device, 'on') }}
+              {{ states(device) != 'off' }}
 
           - condition: template
             value_template: >
               {{ runtime > min_runtime }}
 
         sequence:
-          - service: switch.turn_off
+          - service: >
+              {% if device_domain == 'climate' %}
+                climate.turn_off
+              {% else %}
+                switch.turn_off
+              {% endif %}
             target:
               entity_id: "{{ device }}"
 
@@ -171,6 +186,7 @@ action:
               message: >
                 OFF {{ device }}
                 | Reason:
-                {% if higher_running %}Higher priority active{% endif %}
-                {% if forecast_surplus < 0 %} Forecast low{% endif %}
-                {% if excess_power < device_power %} Not enough solar{% endif %}
+                {% if higher_running %}Higher priority active {% endif %}
+                {% if forecast_surplus < 0 %}Low forecast {% endif %}
+                {% if excess_power < device_power %}Low solar {% endif %}
+                | Runtime: {{ runtime | round(0) }}s
