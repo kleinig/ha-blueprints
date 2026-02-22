@@ -59,13 +59,13 @@ blueprint:
           min: 0
           max: 10000
 
-  check_interval:
-    name: Check Interval (minutes)
-    default: 1
-    selector:
-      number:
-        min: 1
-        max: 10
+    check_interval:
+      name: Check Interval (minutes)
+      default: 1
+      selector:
+        number:
+          min: 1
+          max: 10
 
 mode: restart
 
